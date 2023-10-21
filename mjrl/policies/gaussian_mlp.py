@@ -213,7 +213,12 @@ class BatchNormConvPoolMLP(torch.nn.Module):
                  seed=None,
                  nonlinearity='relu',
                  dropout=0,
-                 embedding_consolidation_type="sum",
+                 embedding_consolidation_type="sum", # or flatten, technically sum is a misnomer because we are averaging
+                 spatial_dims=4,
+                 embed_channel_dim=1280,
+                 proprio_dim=4,
+                 reduced_channel_dim=128,
+                 stride=1,
                  *args, **kwargs,
                  ):
         """
@@ -225,17 +230,17 @@ class BatchNormConvPoolMLP(torch.nn.Module):
         """
         super(BatchNormConvPoolMLP, self).__init__()
         self.history_window = 3
-        self.proprio_dim = 4
-        self.embed_channel_dim = 1280
-        self.reduced_channel_dim = 128
-        self.spatial_dims = 4
+        self.proprio_dim = proprio_dim
+        self.embed_channel_dim = embed_channel_dim
+        self.reduced_channel_dim = reduced_channel_dim
+        self.spatial_dims = spatial_dims
         self.embedding_consolidation_type = embedding_consolidation_type
 
         self.n = env_spec.observation_dim  # number of states
         self.m = env_spec.action_dim  # number of actions
         self.min_log_std = min_log_std
         self.output_device = "cuda"
-
+        self.stride = stride
         # Set seed
         # ------------------------
         if seed is not None:
@@ -245,6 +250,7 @@ class BatchNormConvPoolMLP(torch.nn.Module):
         # Policy network
         # ------------------------
         # make an input conv which keeps the same feature map shape and just reduces the channels from 1280 to 128
+
         if self.embedding_consolidation_type == "3x3_conv" or self.embedding_consolidation_type == "1x1_conv":
             if self.embedding_consolidation_type == "3x3_conv":
                 kernel_size = 3
@@ -257,19 +263,23 @@ class BatchNormConvPoolMLP(torch.nn.Module):
                 in_channels=self.embed_channel_dim,
                 out_channels=self.reduced_channel_dim,
                 kernel_size=kernel_size,
-                stride=1,
+                stride=stride,
                 padding=padding,
             )
             self.conv_layer = torch.nn.Sequential(
                 input_conv,
-                torch.nn.BatchNorm2d(num_features=128),
+                torch.nn.BatchNorm2d(num_features=reduced_channel_dim),
                 torch.nn.ReLU(True),
-                torch.nn.Flatten(),
             )
-            reduced_observation_dim = self.reduced_channel_dim * (self.spatial_dims**2) * self.history_window + self.proprio_dim
-        else:
+            reduced_observation_dim = self.reduced_channel_dim * int((self.spatial_dims/stride)**2) * self.history_window + self.proprio_dim
+        elif self.embedding_consolidation_type == "sum":
             reduced_observation_dim = self.embed_channel_dim * self.history_window + self.proprio_dim
             self.conv_layer = None
+        elif self.embedding_consolidation_type == "flatten":
+            reduced_observation_dim = self.embed_channel_dim * self.history_window * (self.spatial_dims**2) + self.proprio_dim
+            self.conv_layer = None
+        else:
+            raise Exception("embedding_consolidation_type must be one of 3x3_conv, 1x1_conv, sum, or flatten")
 
         self.fc = FCNetworkWithBatchNorm(reduced_observation_dim, self.m, hidden_sizes, nonlinearity, dropout)
 
@@ -298,6 +308,7 @@ class BatchNormConvPoolMLP(torch.nn.Module):
     def get_action(self, observation):
         o = np.float32(observation.reshape(1, -1))
         self.obs_var.data = torch.from_numpy(o)
+        self.obs_var = self.obs_var.to(self.fc.device)
         mean = self.forward(self.obs_var).data.numpy().ravel()
         noise = np.exp(self.log_std_val) * np.random.randn(self.m)
         action = mean + noise
@@ -313,9 +324,13 @@ class BatchNormConvPoolMLP(torch.nn.Module):
             # then pass through the fc layers then return the output
             obs_input = observations[:,:-self.proprio_dim].reshape(observations.shape[0] * self.history_window, self.embed_channel_dim, self.spatial_dims, self.spatial_dims)
             output = self.conv_layer(obs_input)
-        else:
+            output = output.reshape(observations.shape[0], -1)
+        elif self.embedding_consolidation_type == "sum":
             obs_input = observations[:,:-self.proprio_dim].reshape(observations.shape[0], self.history_window * self.embed_channel_dim, self.spatial_dims, self.spatial_dims)
             output = obs_input.mean(dim=[2, 3])
+        elif self.embedding_consolidation_type == "flatten":
+            obs_input = observations[:,:-self.proprio_dim].reshape(observations.shape[0], self.history_window * self.embed_channel_dim * (self.spatial_dims**2))
+            output = obs_input
 
         fc_input = torch.cat((output, proprio_input), dim=1)
         fc_output = self.fc(fc_input)
