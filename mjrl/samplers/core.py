@@ -18,6 +18,7 @@ def do_rollout(
         eval_mode = False,
         horizon = 1e6,
         base_seed = None,
+        get_images=False,
         env_kwargs=None,
 ):
     """
@@ -62,6 +63,7 @@ def do_rollout(
         rewards=[]
         agent_infos = []
         env_infos = []
+        images=[]
 
         o = env.reset()
         done = False
@@ -80,6 +82,7 @@ def do_rollout(
             rewards.append(r)
             agent_infos.append(agent_info)
             env_infos.append(env_info)
+            images.append(env.env.get_image())
             o = next_o
             t += 1
 
@@ -91,6 +94,8 @@ def do_rollout(
             env_infos=tensor_utils.stack_tensor_dict_list(env_infos),
             terminated=done
         )
+        if get_images:
+            path['images'] = np.array(images)
         paths.append(path)
 
     del(env)
@@ -109,6 +114,7 @@ def sample_paths(
         max_process_time=300,
         max_timeouts=4,
         suppress_print=False,
+        get_images=False,
         env_kwargs=None,
         ):
 
@@ -118,7 +124,7 @@ def sample_paths(
 
     if num_cpu == 1:
         input_dict = dict(num_traj=num_traj, env=env, policy=policy,
-                          eval_mode=eval_mode, horizon=horizon, base_seed=base_seed,
+                          eval_mode=eval_mode, horizon=horizon, base_seed=base_seed, get_images=get_images,
                           env_kwargs=env_kwargs)
         # dont invoke multiprocessing if not necessary
         return do_rollout(**input_dict)
